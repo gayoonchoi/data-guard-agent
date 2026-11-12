@@ -7,3 +7,6 @@
 
 <img width="1271" height="648" alt="image" src="https://github.com/user-attachments/assets/00f29d9f-ce14-448a-9ea9-52086dbb3794" />
 
+## 내부 기밀 자료, 데이터 공개 불가 
+
+## 기능 단위 위주로 GitHub 등록 예정 
