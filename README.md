@@ -1,4 +1,4 @@
-# DataGuard (단계별 클릭 단계별 클릭 기반 자동화 파이프라인)
+# DataGuard (단계별 클릭 기반 자동화 파이프라인)
 
 **AI 학습데이터 구문 품질 검증 및 보완결과서 작성 지원 PoC**  
 `Rule Knowledge Base` · `Deterministic Validation` · `Gradio` · `Excel Reporting`
