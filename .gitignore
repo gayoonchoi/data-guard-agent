@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Company data and generated outputs
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.wav
+*.mp4
+*.pdf
+*.jsonl
+outputs/
+_backups/
+backups/
+temp/
+data/
+
+# Extracted business rules and state
+DataGuard_RuleKB_v01/rules/
+DataGuard_RuleKB_v01/catalog.json
+DataGuard_RuleKB_v01/rule_dictionary.json
+DataGuard_RuleKB_v01/rule_index.csv
+DataGuard_RuleKB_v01/audit.json
+DataGuard_RuleKB_v01/*approval*.json
+
+# Local machine files
+.vscode/
+.ipynb_checkpoints/
