@@ -1,39 +1,69 @@
-# Python
+# Python artifacts / local environments
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
 
-# Credentials
+# Secrets and machine-local configuration
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.db
+.vscode/
+.idea/
 
-# Company data and generated outputs
+# Company/customer data, inspection reports, generated outputs
 *.xlsx
 *.xls
+*.xlsm
 *.csv
-*.zip
-*.wav
-*.mp4
-*.pdf
+*.tsv
+*.json
 *.jsonl
-outputs/
-_backups/
-backups/
-temp/
-data/
+*.ndjson
+*.zip
+*.7z
+*.rar
+*.parquet
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.pdf
+*.hwp
+*.hwpx
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.ipynb
 
-# Extracted business rules and state
+# Runtime knowledge bases / approvals / logs / backups
+DataGuard_RuleKB_UserBuilt/
 DataGuard_RuleKB_v01/rules/
-DataGuard_RuleKB_v01/catalog.json
-DataGuard_RuleKB_v01/rule_dictionary.json
-DataGuard_RuleKB_v01/rule_index.csv
-DataGuard_RuleKB_v01/audit.json
-DataGuard_RuleKB_v01/*approval*.json
+DataGuard_RuleKB_v01/_backups/
+**/outputs/
+**/_backups/
+**/backups/
+**/temp/
+**/tmp/
+**/logs/
+*.log
 
-# Local machine files
-.vscode/
-.ipynb_checkpoints/
+# Temporary Office files
+~$*
+
+# Note: .gitignore does NOT untrack files already committed/staged.
+# Review: git ls-files  and  git diff --cached --name-only
