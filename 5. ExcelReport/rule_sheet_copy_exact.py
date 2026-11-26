@@ -29,7 +29,7 @@ import posixpath
 
 _MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
-_RULE_NAME = re.compile(r"^\d+\.\s*(?:구축기업|검사)\s*구문규칙$")
+_RULE_NAME = re.compile(r"^(?:\d+\.\s*)?(?:구축기업|검사)\s*구문규칙$")
 _XL_NONE = -4142
 
 
@@ -167,7 +167,13 @@ def restore_original_rule_sheets(inspection_file: str | Path,
 
     expected = _sheet_xml_members(src_path)
     present_names = {name for name, _, _ in _sheet_xml_members(dst_path)}
-    missing = [name for name, _, _ in expected if name not in present_names]
+    # 017 inspection source: "검사 구문규칙"; generated draft: "1. 검사 구문규칙".
+    target_names = {
+        name: (name if name in present_names else
+               "1. " + name if "1. " + name in present_names else name)
+        for name, _, _ in expected
+    }
+    missing = [name for name, _, _ in expected if target_names[name] not in present_names]
     if missing:
         raise ValueError(f"보완결과서에 필요한 구문규칙 시트가 없습니다: {missing}")
 
@@ -200,13 +206,14 @@ def restore_original_rule_sheets(inspection_file: str | Path,
             raise PermissionError("임시 보완결과서를 읽기 전용으로 열었습니다.")
         original_count = target_book.Worksheets.Count
         for name, last_row, last_col in expected:
+            target_name = target_names[name]
             original = source_book.Worksheets(name)
-            obsolete = target_book.Worksheets(name)
+            obsolete = target_book.Worksheets(target_name)
             # Excel 자체 시트 복사: 병합, 원본 규칙값, 열 너비, 행 높이를 유지.
             original.Copy(Before=obsolete)
             copied = target_book.Worksheets(obsolete.Index - 1)
             obsolete.Delete()
-            copied.Name = name
+            copied.Name = target_name
             try:
                 copied.Cells.ClearComments()
             except Exception:
@@ -249,7 +256,7 @@ def restore_original_rule_sheets(inspection_file: str | Path,
     # 저장 이후에도 구문규칙 시트가 존재하는지 구조 확인 (수치 서식 강제 검증 X).
     try:
         final_names = {name for name, _, _ in _sheet_xml_members(temp_path)}
-        if not {name for name, _, _ in expected}.issubset(final_names):
+        if not {target_names[name] for name, _, _ in expected}.issubset(final_names):
             raise RuntimeError("저장된 보고서에 구문규칙 시트가 누락됐습니다.")
         backup_dir = dst_path.parent / "_backups"
         backup_dir.mkdir(exist_ok=True)

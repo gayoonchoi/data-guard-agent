@@ -190,16 +190,37 @@ def determine_issue(value, rule_text):
             f'검사결과서 유효패턴을 만족하도록 보완해야 함: {pattern[:180]} [원천 근거를 확인한 뒤 수정]')
 
 
-def analyze(inspection, source, mode='folder', output_dir='outputs/step4_evidence'):
+def analyze(inspection, source, mode='folder', output_dir='outputs/step4_evidence',
+            treat_absent_as_removed=False):
     rows, summary = match_inspection(inspection, folder=source if mode == 'folder' else None,
                                      archive=source if mode == 'zip' else None)
+    if treat_absent_as_removed and summary.get('file_count', 0) == 0:
+        raise ValueError('선택한 최종 데이터 폴더/ZIP에 검증 대상 파일이 하나도 없습니다. 폴더 경로를 확인하세요.')
     results = []
     counters = Counter()
     for row in rows:
         out = {**row, '원본 레코드 해석': '', '현재 검증 상태': '검토 필요',
                '보완 전(실제값/미리보기)': '', '원본값 SHA256': '',
                '보완 후(규칙상 요구사항/초안)': '', '담당자 조치': '', '보완 완료 여부': '미완료'}
-        if row['매칭상태'] != '일치':
+        if row['매칭상태'] == '파일 없음' and treat_absent_as_removed:
+            # Explicitly enabled for an authoritative FINAL data folder/ZIP only.
+            # A missing file is NOT evidence that its original field was repaired.
+            out['현재 검증 상태'] = '삭제·제외 간주(최종 폴더 부재)'
+            out['보완 전(실제값/미리보기)'] = (
+                '검사결과서 기록: ' + str(row.get('검사 프로퍼티', '')) +
+                ' = ' + str(row.get('오류 메시지', '') or '(오류값 별도 확인)') +
+                ' / 검사 규칙: ' + str(row.get('검사 규칙', ''))
+            )
+            out['보완 후(규칙상 요구사항/초안)'] = (
+                '해당 오류 파일이 최종 보완 데이터셋에서 확인되지 않아 '
+                '삭제·제외된 것으로 간주하며, 파일 내부 값 수정 대상에서 제외함.'
+            )
+            out['담당자 조치'] = (
+                '최종 보완 데이터셋에 해당 파일이 없음을 확인; '
+                '삭제 이력은 검사결과서만으로 확인할 수 없음'
+            )
+            out['보완 완료 여부'] = '삭제·제외 간주(확인 필요)'
+        elif row['매칭상태'] != '일치':
             out['현재 검증 상태'] = '파일 연결 실패'
             out['담당자 조치'] = f'매칭 상태 확인: {row["매칭상태"]}'
         else:

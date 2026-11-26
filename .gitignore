@@ -1,69 +1,32 @@
-# Python artifacts / local environments
+# Python and local environments
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
+.ipynb_checkpoints/
 
-# Secrets and machine-local configuration
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-*.pfx
-*.sqlite
-*.sqlite3
-*.db
-.vscode/
-.idea/
+# Private/generated local data; do not push without owner approval
+1. RuleEngine/outputs/
+5. ExcelReport/outputs/
+DataGuard_RuleKB_UserBuilt/
+DataGuard_RuleKB_v01/_backups/
+DataGuard_RuleKB_v01/rules/
+DataGuard_RuleKB_v01/catalog.json
+DataGuard_RuleKB_v01/audit.json
+DataGuard_RuleKB_v01/rule_dictionary.json
+DataGuard_RuleKB_v01/rule_index.csv
+DataGuard_RuleKB_v01/folder_mapping.template.json
+experiments/ollama_standalone/test_results/
 
-# Company/customer data, inspection reports, generated outputs
+# Generated reports, local source data, optional copies
 *.xlsx
 *.xls
-*.xlsm
 *.csv
-*.tsv
-*.json
 *.jsonl
-*.ndjson
-*.zip
-*.7z
-*.rar
-*.parquet
 *.wav
 *.mp3
-*.mp4
-*.avi
-*.pdf
-*.hwp
-*.hwpx
-*.png
-*.jpg
-*.jpeg
-*.webp
-*.gif
-*.ipynb
-
-# Runtime knowledge bases / approvals / logs / backups
-DataGuard_RuleKB_UserBuilt/
-DataGuard_RuleKB_v01/rules/
-DataGuard_RuleKB_v01/_backups/
-**/outputs/
-**/_backups/
-**/backups/
-**/temp/
-**/tmp/
-**/logs/
-*.log
-
-# Temporary Office files
-~$*
-
-# Note: .gitignore does NOT untrack files already committed/staged.
-# Review: git ls-files  and  git diff --cached --name-only
+*.zip
+*.7z
+*.env
+.env.*
+_local_archive/

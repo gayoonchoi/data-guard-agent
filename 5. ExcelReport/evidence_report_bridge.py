@@ -120,17 +120,35 @@ def _build_target_map(source, report_path, csv_rows, reader_module):
                     observed = evidence.get('보완 전(실제값/미리보기)', '').strip()
                     suggestion = evidence.get('보완 후(규칙상 요구사항/초안)', '').strip()
                     replacements = {}
-                    if matched and observed and state not in ('파일 연결 실패', '대상 위치 확인 필요'):
+                    excluded = (evidence.get('매칭상태') == '파일 없음'
+                                and state.startswith('삭제·제외 간주'))
+                    if excluded:
+                        # D (검사 당시 기록) is preserved; no claim of current-value verification.
+                        replacements['E'] = (
+                            suggestion or '최종 보완 데이터셋에서 파일이 확인되지 않아 삭제·제외로 간주함.'
+                        )
+                        replacements['F'] = (
+                            '삭제·제외 간주(최종 폴더 부재) · 삭제 이력 별도 확인 필요 · 로컬LLM 미사용'
+                        )
+                        stats['삭제·제외 간주'] += 1
+                    elif matched and observed and state not in ('파일 연결 실패', '대상 위치 확인 필요'):
                         replacements['D'] = '현재 원본 확인값: ' + observed
                         if suggestion:
                             replacements['E'] = suggestion
+                            if (evidence.get('로컬LLM 결과', '').startswith('제안 생성')
+                                    and evidence.get('로컬LLM 모델', '').strip()):
+                                stats['로컬LLM 제안 반영'] += 1
                         stats['실제값 확인'] += 1
                     else:
                         stats['검토 대기'] += 1
                     # Keep existing notes for traceability; append current review state.
                     existing_note = str(actual.get(6) or '').strip()
-                    if state:
+                    if state and not excluded:
                         review_note = f'검토: {state} · 미완료'
+                        if (matched and observed
+                                and evidence.get('로컬LLM 결과', '').startswith('제안 생성')
+                                and evidence.get('로컬LLM 모델', '').strip()):
+                            review_note += f" · 로컬LLM({evidence['로컬LLM 모델']}) 수정 제안·미승인"
                         replacements['F'] = (existing_note + ' / ' + review_note).strip(' /')
                     if replacements:
                         targets.setdefault(report_sheet, {})[report_row] = replacements

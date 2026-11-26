@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import html
 from datetime import datetime
 from pathlib import Path
 import posixpath
@@ -22,6 +23,7 @@ try:
 except ImportError:
     Blob = SpreadsheetFile = None  # Windows fallback is project-specific
 
+DATAGUARD_REPORT_VERSION = "v0.4.0-20261125"
 ROOT = Path(__file__).resolve().parent
 TEMPLATE = ROOT / "보완결과서_표준양식.xlsx"
 MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -57,42 +59,76 @@ class WorkbookReader:
             member = (rel_path.lstrip("/") if rel_path.startswith("/")
                       else posixpath.normpath("xl/" + rel_path))
             self.sheets[s.get("name")] = member
+        # Some valid single-group inspection workbooks (017) omit the "1. " prefix.
+        # Expose read-only aliases; the original Excel sheet names remain unchanged.
+        unnumbered = ("검사 종합 현황", "파일 오류 목록", "구조 오류 목록",
+                      "형식 오류 목록", "구축기업 구문규칙", "검사 구문규칙")
+        if ("검사 종합 현황" in self.sheets and not any(
+                re.fullmatch(r"\d+\.\s*검사 종합 현황", n) for n in self.sheets)):
+            for name in unnumbered:
+                if name in self.sheets:
+                    self.sheets.setdefault("1. " + name, self.sheets[name])
         self.shared = []
         if "xl/sharedStrings.xml" in self.zip.namelist():
             strings = ET.fromstring(self.zip.read("xl/sharedStrings.xml"))
             self.shared = ["".join(s.itertext()) for s in strings.findall(MAIN_NS + "si")]
 
     def rows(self, name: str):
-        if name not in self.sheets:
+        """Read actual (nonempty) OOXML cells; skip millions of format-only rows.
+
+        Reading never changes the inspection workbook. The regex selects row/cell
+        blocks only; original XML strings are resolved using sharedStrings.
+        """
+        member = self.sheets.get(name)
+        if not member:
             return
-        member = self.sheets[name]
-        with self.zip.open(member) as source:
-            for _, row in ET.iterparse(source, events=("end",)):
-                if row.tag != MAIN_NS + "row":
+        xml = self.zip.read(member)
+        row_re = re.compile(rb'<(?:[A-Za-z_][\w.-]*:)?row\b[^>]*>.*?</(?:[A-Za-z_][\w.-]*:)?row>', re.S)
+        cell_re = re.compile(rb'<(?:[A-Za-z_][\w.-]*:)?c\b(?P<attrs>[^>]*?)(?:/>|>(?P<body>.*?)</(?:[A-Za-z_][\w.-]*:)?c>)', re.S)
+        ref_re = re.compile(rb'\br="([A-Z]+[0-9]+)"')
+        rownum_re = re.compile(rb'\br="([0-9]+)"')
+        val_re = re.compile(rb'<(?:[A-Za-z_][\w.-]*:)?v>(.*?)</(?:[A-Za-z_][\w.-]*:)?v>', re.S)
+        inline_re = re.compile(rb'<(?:[A-Za-z_][\w.-]*:)?is\b[^>]*>(.*?)</(?:[A-Za-z_][\w.-]*:)?is>', re.S)
+        txt_re = re.compile(rb'<(?:[A-Za-z_][\w.-]*:)?t(?:\s[^>]*)?>(.*?)</(?:[A-Za-z_][\w.-]*:)?t>', re.S)
+        for row_match in row_re.finditer(xml):
+            chunk = row_match.group()
+            if (b'<v' not in chunk and b':v>' not in chunk and
+                    b'<is' not in chunk and b':is' not in chunk):
+                continue
+            row_start_end = chunk.find(b'>')
+            mrow = rownum_re.search(chunk[:row_start_end + 1])
+            if not mrow:
+                continue
+            row_num = int(mrow.group(1))
+            vals = {}
+            for match in cell_re.finditer(chunk):
+                ref = ref_re.search(match.group('attrs'))
+                if not ref:
                     continue
-                values = {}
-                for c in row.findall(MAIN_NS + "c"):
-                    ref = c.get("r", "")
-                    if not re.match(r"^[A-Z]+\d+$", ref):
-                        continue
-                    element = c.find(MAIN_NS + "v")
-                    inline = c.find(MAIN_NS + "is")
-                    if element is not None and element.text is not None:
-                        v = element.text
-                        if c.get("t") == "s":
-                            v = self.shared[int(v)]
-                        elif c.get("t") not in ("str", "inlineStr", "e"):
-                            try:
-                                v = float(v) if "." in v or "E" in v else int(v)
-                            except (ValueError, TypeError):
-                                pass
-                    elif inline is not None:
-                        v = "".join(inline.itertext())
-                    else:
-                        continue
-                    values[_col_number(ref)] = v
-                yield int(row.get("r", "0")), values
-                row.clear()
+                address = ref.group(1).decode('ascii')
+                body = match.group('body') or b''
+                if not body:
+                    continue
+                typ = re.search(rb'\bt="([^"]+)"', match.group('attrs'))
+                typ = typ.group(1).decode() if typ else ''
+                v = val_re.search(body)
+                inline = inline_re.search(body)
+                if v:
+                    value = html.unescape(v.group(1).decode('utf-8', errors='replace'))
+                    if typ == 's':
+                        value = self.shared[int(value)]
+                    elif typ not in ('str', 'inlineStr', 'e'):
+                        try:
+                            value = float(value) if '.' in value or 'E' in value.upper() else int(value)
+                        except (TypeError, ValueError):
+                            pass
+                elif inline:
+                    value = ''.join(html.unescape(x.group(1).decode('utf-8', errors='replace')) for x in txt_re.finditer(inline.group(1)))
+                else:
+                    continue
+                vals[_col_number(address)] = value
+            if vals:
+                yield row_num, vals
 
     def cell(self, sheet, row_num, col_num):
         for idx, vals in self.rows(sheet):
@@ -160,13 +196,16 @@ def extract_all(reader: WorkbookReader):
         # All original rule cells, including nesting and conflicting patterns.
         rules = {}
         for which, sheet_name in [('company',company_name),('inspection',inspection_name)]:
-            rows = [(r, vals) for r, vals in reader.rows(sheet_name) if r <= 1000]
+            rows = [(r, vals) for r, vals in reader.rows(sheet_name)
+                    if any(v not in (None, "") for v in vals.values())]
             if not rows:
                 raise ValueError(f"구문규칙 시트가 비었습니다: {sheet_name}")
             height = max(r for r,_ in rows)
             width = max(max(v) for _,v in rows if v)
-            if height > 999 or width > 50:
-                raise ValueError('예상보다 큰 규칙 표입니다. 시트 형식을 확인해 주세요.')
+            # A genuine million-row rule table cannot be represented by the report
+            # template safely; make any such case explicit instead of truncating.
+            if height > 20000 or width > 16384:
+                raise ValueError(f'구문규칙 표가 Excel 출력 한계를 초과합니다: {sheet_name}')
             matrix = [[None]*width for _ in range(height)]
             for r, vals in rows:
                 for col, value in vals.items():
@@ -180,13 +219,15 @@ def extract_all(reader: WorkbookReader):
                 vb=b[r][col] if r<len(b) and col<len(b[r]) else None
                 if (str(va) if va is not None else '') != (str(vb) if vb is not None else ''):
                     gaps.append(f"{_excel_col(col+1)}{r+1}")
+        warnings = []
         for kind, (_, stated) in counts.items():
             if stated != len(errors[kind]):
-                raise ValueError(f"{g}번 그룹 {kind} 집계 불일치: 종합현황 {stated}, 상세 목록 {len(errors[kind])}. 검토가 필요합니다.")
-        groups.append({'id':g,'name':group_label,'counts':counts,'errors':errors,'rules':rules,'differences':gaps})
+                warnings.append(f"{g}번 그룹 {kind}: 종합현황 오류 {stated:,}건 ≠ 상세 오류 {len(errors[kind]):,}건")
+        groups.append({'id':g,'name':group_label,'counts':counts,'errors':errors,
+                       'rules':rules,'differences':gaps,'warnings':warnings})
     groups.sort(key=lambda g:g['id'])
     if not groups:
-        raise ValueError('검사결과서에서 「1. 검사 종합 현황」 형태의 시트를 찾지 못했습니다.')
+        raise ValueError('검사결과서에서 「검사 종합 현황」 또는 「N. 검사 종합 현황」 시트를 찾지 못했습니다.')
     return groups
 
 
@@ -409,7 +450,12 @@ def generate_report(inspection_file, output_path=None, template_path=None,
     inputfile=Path(inspection_file)
     if not inputfile.is_file():raise FileNotFoundError(inputfile)
     if int(round_no)<1 or int(round_no)>99:raise ValueError('보완 단계는 1~99차만 허용합니다.')
-    known_id=project_id_from_inspection(inputfile)
+    try:
+        known_id=project_id_from_inspection(inputfile)
+    except ValueError:
+        if not project_id:
+            raise ValueError("파일명에서 사업 번호를 알 수 없습니다. 예: '(015) 검사결과서.xlsx'로 사본 이름을 변경하거나 project_id를 지정하세요.")
+        known_id=str(project_id).zfill(3)
     if project_id and str(project_id).zfill(3)!=known_id:
         raise ValueError(f'사업 ID 불일치: 파일명 {known_id}, 지정값 {project_id}')
     template=Path(template_path) if template_path else TEMPLATE
@@ -443,7 +489,7 @@ def generate_report(inspection_file, output_path=None, template_path=None,
             conflicts=sum(len(g['differences']) for g in groups)
             return {'path':str(dest),'project_id':known_id,'project_name':project_name,
                     'groups':len(groups),'issues':total,'done':0,'mismatch_cells':conflicts,
-                    'group_details':[(g['id'],g['name'],sum(len(v) for v in g['errors'].values()),g['differences']) for g in groups]}
+                    'group_details':[(g['id'],g['name'],sum(len(v) for v in g['errors'].values()),g['differences']) for g in groups], 'warnings':[w for g in groups for w in g.get('warnings',[])], 'generator_version':DATAGUARD_REPORT_VERSION}
         # v0.7: construct output in a NEW workbook, copying only needed template
         # ranges. This prevents stale notes, example styles and wrong merged cells.
         import importlib.util
@@ -457,7 +503,7 @@ def generate_report(inspection_file, output_path=None, template_path=None,
         conflicts=sum(len(g['differences']) for g in groups)
         return {'path':str(dest),'project_id':known_id,'project_name':project_name,
                 'groups':len(groups),'issues':total,'done':0,'mismatch_cells':conflicts,
-                'group_details':[(g['id'],g['name'],sum(len(v) for v in g['errors'].values()),g['differences']) for g in groups]}
+                'group_details':[(g['id'],g['name'],sum(len(v) for v in g['errors'].values()),g['differences']) for g in groups], 'warnings':[w for g in groups for w in g.get('warnings',[])], 'generator_version':DATAGUARD_REPORT_VERSION}
     finally:
         reader.close()
 

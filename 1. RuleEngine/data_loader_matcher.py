@@ -37,7 +37,7 @@ MAX_COMPRESSION_RATIO = 1000
 CSV_COLUMNS = [
     '사업ID', '규칙그룹', '오류구분', '검사결과서 시트', '검사결과서 행',
     '파일명(원문)', '매칭파일명', '원본 상대경로', '행표기', '검사 항목', '검사 프로퍼티',
-    '검사 규칙', '오류 메시지', '매칭상태', '실제 데이터 위치', '동일명 후보수', '후보 경로',
+    '검사 규칙', '오류 메시지', '매칭상태', '실제 데이터 위치', '동일명 후보수', '후보 경로', '매칭 방식',
 ]
 
 
@@ -263,6 +263,30 @@ def scan_zip(zip_path: str | Path) -> dict[str, list[str]]:
     return db
 
 
+def _remove_revision_suffix(value: str) -> str:
+    """Normalize only an explicit round suffix, e.g. sample_1차.json -> sample.json."""
+    return re.sub(r'_[1-9][0-9]*차(?=\.(?:jsonl|json|txt|csv|xlsx)$)',
+                  '', value, flags=re.IGNORECASE)
+
+
+def _unique_revision_index(index: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Build reversible basename aliases. Never guess when several rounds exist."""
+    aliases = defaultdict(list)
+    for normalized_name, actual_paths in index.items():
+        key = _remove_revision_suffix(normalized_name)
+        if key != normalized_name:
+            aliases[key].extend(actual_paths)
+    return aliases
+
+
+def _relative_name_matches(candidate: str, request: str, revision_alias: bool) -> bool:
+    candidate_key = _normalized(candidate)
+    request_key = _normalized(request)
+    if revision_alias:
+        candidate_key = _remove_revision_suffix(candidate_key)
+    return candidate_key == request_key or candidate_key.endswith('/' + request_key)
+
+
 def match_inspection(inspection_path: str | Path, *, folder: str | Path | None = None,
                      archive: str | Path | None = None, project_id: str | None = None,
                      group_extensions: dict[str, list[str]] | None = None) -> tuple[list[dict], dict]:
@@ -270,11 +294,13 @@ def match_inspection(inspection_path: str | Path, *, folder: str | Path | None =
         raise ValueError('로컬 폴더 또는 ZIP 중 하나만 선택해 주세요.')
     rows, meta = parse_inspection(inspection_path, project_id)
     index = scan_folder(folder) if folder else scan_zip(archive)
-    extmap = group_extensions or ({'1': ['.json'], '2': ['.txt']}
-                                   if meta['project_id'] == '019' else {})
+    # Never infer file extensions from a particular project number.
+    extmap = group_extensions or {}
+    round_aliases = _unique_revision_index(index)
     matched_unique = set()
     counts = Counter()
     for row in rows:
+        revision_alias = False
         name = row['매칭파일명']
         ext = Path(name).suffix.casefold()
         permitted = [e.casefold() for e in extmap.get(row['규칙그룹'], [])]
@@ -283,14 +309,18 @@ def match_inspection(inspection_path: str | Path, *, folder: str | Path | None =
         elif permitted and ext not in permitted:
             status, candidates = '그룹 확장자 불일치', []
         else:
+            # Exact match always takes precedence over revision-suffix inference.
             candidates = index.get(_normalized(name), [])
+            revision_alias = False
+            if not candidates:
+                candidates = round_aliases.get(_normalized(name), [])
+                revision_alias = bool(candidates)
             # Explicit relative folders in the inspection are authoritative.
             # Do not accidentally match a same-named file from a different group.
             request = row.get('원본 상대경로', '').strip('/').replace('\\', '/')
             if '/' in request:
-                key = _normalized(request)
-                matching_paths = [c for c in candidates if _normalized(c) == key or
-                                  _normalized(c).endswith('/' + key)]
+                matching_paths = [c for c in candidates
+                                  if _relative_name_matches(c, request, revision_alias)]
                 status = '경로 불일치' if candidates and not matching_paths else None
                 candidates = matching_paths
             else:
@@ -305,6 +335,9 @@ def match_inspection(inspection_path: str | Path, *, folder: str | Path | None =
             else:
                 status = '파일 없음'
         row['매칭상태'] = status
+        row['매칭 방식'] = ('회차 접미사 후보(검사파일명과 차이 있음; 원본 상태 재검증 필요)'
+                            if status == '일치' and revision_alias
+                            else ('정확한 파일명 일치' if status == '일치' else ''))
         row['실제 데이터 위치'] = candidates[0] if len(candidates) == 1 else ''
         row['동일명 후보수'] = len(candidates)
         row['후보 경로'] = ' | '.join(candidates[:5])  # at most five; no arbitrary selection

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import csv
 import hashlib
 import json
 import os
@@ -290,6 +291,9 @@ def create_report(inspection_file, round_number):
                   f"규칙 {result['groups']}개 그룹 · 오류 목록 {result['issues']:,}건 · "
                   "보완 완료 0건  \n"
                   "검사결과서 기준 초안이며 ④ 실제 데이터 검토 내역은 반영하지 않았습니다.")
+        status = (f"**③ 생성기: {result.get('generator_version', '확인 불가')}**  \n" + status)
+        if result.get('warnings'):
+            status += '\n**검사결과서 집계 불일치(검토 필요):** ' + ' / '.join(result['warnings'][:8])
         return status, result['path']
     except Exception as exc:
         return f'초안 생성 실패: {type(exc).__name__}: {exc}', None
@@ -321,7 +325,9 @@ def apply_step5_review(inspection_file, draft_report, evidence_csv_file):
         msg = (f"**⑤ 반영 완료 — 사업 {result['project_id']}**  \n"
                f"실제값 확인 {stats.get('실제값 확인',0):,}건 · "
                f"검토 대기 {stats.get('검토 대기',0):,}건 · "
-               f"대조 완료 {stats.get('대조 완료',0):,}건  \n"
+               f"삭제·제외 간주 {stats.get('삭제·제외 간주',0):,}건 · "
+               f"대조 완료 {stats.get('대조 완료',0):,}건 · "
+               f"Ollama 제안 반영 {stats.get('로컬LLM 제안 반영',0):,}건  \n"
                "③ 초안·구문규칙·원본 라벨링데이터는 변경하지 않았습니다. "
                "수정 지시 초안이며 실제 보완 완료 건수는 0건입니다.")
         return msg, result['path']
@@ -329,9 +335,15 @@ def apply_step5_review(inspection_file, draft_report, evidence_csv_file):
         return f'⑤ 반영 실패: {type(exc).__name__}: {exc}', None
 
 
-def load_step5_inputs(report_inspection, report_output, matcher_inspection, review_csv):
+def load_step5_inputs(report_inspection, report_output, matcher_inspection, review_csv, ollama_csv=None):
     """Convenience: copy session files into ⑤ controls, without processing them."""
     inspection_file = report_inspection or matcher_inspection
+    n_proposals = _model_csv_count(ollama_csv) if ollama_csv else None
+    llm_note = ('⚠️ Ollama 수정안 0건: ④ 기본 검토 CSV를 사용합니다. '
+                '원본 파일 매칭 실패 원인을 먼저 확인하세요.'
+                if n_proposals == 0 else
+                (f'Ollama 수정 제안 {n_proposals}건 포함' if n_proposals is not None else ''))
+    review_csv = (ollama_csv if n_proposals else review_csv)
     if not inspection_file or not report_output or not review_csv:
         missing = []
         if not inspection_file: missing.append('검사결과서')
@@ -341,7 +353,44 @@ def load_step5_inputs(report_inspection, report_output, matcher_inspection, revi
                 gr.update(value=review_csv),
                 '불러올 파일이 없습니다: ' + ', '.join(missing) + ' · 아래에서 파일을 직접 선택할 수 있어요.')
     return (gr.update(value=inspection_file), gr.update(value=report_output),
-            gr.update(value=review_csv), '③ 초안과 ④ CSV를 불러왔어. 사업 ID가 같은지 확인 후 ⑤를 실행해 주세요.')
+            gr.update(value=review_csv), '③ 초안과 ④ CSV를 불러왔어. 사업 ID가 같은지 확인 후 ⑤를 실행해 주세요. ' + llm_note)
+
+
+def choose_local_folder(current_path):
+    """Open the Windows native folder picker on this SAME PC as the Gradio server."""
+    if sys.platform != 'win32':
+        return gr.update(), '폴더 선택 팝업은 Windows 로컬 실행에서 지원합니다. 경로 직접 입력은 가능합니다.'
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        parent = tk.Tk()
+        parent.withdraw()
+        parent.attributes('-topmost', True)
+        parent.update()
+        start = str(current_path or '').strip().strip('"')
+        if not Path(start).is_dir():
+            start = str(Path.home())
+        try:
+            selected = filedialog.askdirectory(parent=parent, title='DataGuard 라벨링데이터 폴더 선택',
+                                               initialdir=start, mustexist=True)
+        finally:
+            parent.destroy()
+        if selected:
+            return gr.update(value=selected), f'선택된 로컬 폴더: `{selected}`'
+        return gr.update(), '폴더 선택을 취소했습니다.'
+    except Exception as exc:
+        return gr.update(), (f'Windows 폴더 선택 팝업을 열지 못했습니다: {type(exc).__name__}. '
+                             '프로그램이 사용자 PC의 Windows 데스크톱에서 실행되는지 확인하세요.')
+
+
+def _model_csv_count(path):
+    if not path or not Path(path).is_file():
+        return None
+    with open(path, encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        if '로컬LLM 결과' not in (reader.fieldnames or []):
+            return None
+        return sum(row.get('로컬LLM 결과', '').startswith('제안 생성') for row in reader)
 
 
 def match_error_files(inspection_file, source_mode, folder_path, zip_file):
@@ -387,7 +436,8 @@ def match_error_files(inspection_file, source_mode, folder_path, zip_file):
 
 
 
-def inspect_before_after(inspection_file, source_mode, folder_path, zip_file):
+def inspect_before_after(inspection_file, source_mode, folder_path, zip_file,
+                         final_dataset_missing_is_removed=False):
     """④ actual field values + rule-based correction instructions (NEVER mark completed)."""
     cols = ['파일명(원문)', '행표기', '검사 프로퍼티', '현재 검증 상태',
             '보완 전(실제값/미리보기)', '보완 후(규칙상 요구사항/초안)', '담당자 조치']
@@ -407,6 +457,7 @@ def inspect_before_after(inspection_file, source_mode, folder_path, zip_file):
         result = module.analyze(
             inspection=inspection_file, source=source, mode=source_mode,
             output_dir=root / '1. RuleEngine' / 'outputs' / 'evidence_review',
+            treat_absent_as_removed=bool(final_dataset_missing_is_removed),
         )
         a = result['summary']
         counts = a['evidence_status_counts']
@@ -421,11 +472,61 @@ def inspect_before_after(inspection_file, source_mode, folder_path, zip_file):
         message = (f"**사업 {a['project_id']} · 오류 {a['issues']:,}건 검토**  \n"
                    f"실제 규칙 위반 {counts.get('현재 규칙 위반',0):,}건 · "
                    f"현재 규칙 통과 {counts.get('현재 규칙 통과',0):,}건 · "
-                   f"구조/내용 확인 필요 {sum(v for k,v in counts.items() if k not in ('현재 규칙 위반','현재 규칙 통과')):,}건  \n"
+                   f"삭제·제외 간주 {counts.get('삭제·제외 간주(최종 폴더 부재)',0):,}건 · "
+                   f"추가 확인 필요 {sum(v for k,v in counts.items() if k not in ('현재 규칙 위반','현재 규칙 통과','삭제·제외 간주(최종 폴더 부재)')):,}건  \n"
                    f"**원본 불변 · 보완 완료 0건** · 보완 후 칸은 수정 지시 초안" + warning)
         return message, pd.DataFrame(result['rows'][:40], columns=cols), result['csv'], result['json']
     except Exception as exc:
         return f'보완 전후 검토 실패: {type(exc).__name__}: {exc}', empty, None, None
+
+def write_local_correction_suggestions(review_csv_path, model_name, limit, include_before):
+    """Optional local-only ④-B: preserve ④ CSV and create a new ⑤-compatible review CSV."""
+    empty = pd.DataFrame(columns=["검사 프로퍼티", "보완 전(실제값/미리보기)",
+                                  "보완 후(규칙상 요구사항/초안)", "로컬LLM 결과"])
+    if not review_csv_path:
+        return "먼저 ④ 검토 CSV를 선택해 주세요.", empty, None
+    try:
+        root = Path(__file__).resolve().parent
+        module_path = root / '1. RuleEngine' / 'local_correction_agent.py'
+        if not module_path.is_file():
+            raise FileNotFoundError(f'로컬 수정안 모듈 누락: {module_path}')
+        spec = importlib.util.spec_from_file_location('dg_local_correction_agent', module_path)
+        agent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent)
+        model = str(model_name or 'qwen2.5:7b-instruct').strip()
+        count = int(limit or 10)
+        if not 1 <= count <= 200:
+            raise ValueError('한 번에 1~200건까지 실험할 수 있습니다.')
+        from datetime import datetime
+        from uuid import uuid4
+        destination = (root / '1. RuleEngine' / 'outputs' / 'ollama_review'
+                       / (datetime.now().strftime('%Y%m%d_%H%M%S') + '_'
+                          + uuid4().hex[:8] + '.csv'))
+        result = agent.enhance_csv(
+            source=review_csv_path, destination=destination,
+            model=model, limit=count, include_before=bool(include_before),
+        )
+        preview = pd.read_csv(result['output'], encoding='utf-8-sig',
+                              dtype=str, keep_default_na=False, nrows=30)
+        show_cols = [x for x in ('파일명(원문)', '검사 프로퍼티',
+                                 '보완 전(실제값/미리보기)',
+                                 '보완 후(규칙상 요구사항/초안)',
+                                 '로컬LLM 결과', '로컬LLM 제안 근거')
+                     if x in preview.columns]
+        preview = preview[show_cols]
+        info = (f"**로컬 수정 제안 처리 완료** · 모델 `{model}`  \n"
+                f"제안 생성 {result['generated']:,}건 · "
+                f"실패 {result['failures']:,}건 · 건너뜀 {result['skipped']:,}건 · "
+                f"모델 추론 호출 시도 {result['inference_attempts']:,}회  \n")
+        if result['inference_attempts'] == 0:
+            reasons = ', '.join(f'{k} {v}건' for k, v in result['skip_reasons'].items())
+            info += f"⚠️ **이번 실행에서 모델 추론 0회** — {reasons or '대상 행 없음'}  \n"
+        info += ("실제 데이터와 ④ CSV는 수정하지 않았습니다. "
+                 "결과 CSV를 검토한 뒤 ⑤에서 반영해 주세요.")
+        return info, preview, result['output']
+    except Exception as exc:
+        return f"로컬 수정안 생성 실패: {type(exc).__name__}: {exc}", empty, None
+
 
 CSS = """
 .gradio-container {max-width: 1050px !important; margin: auto !important;}
@@ -496,9 +597,12 @@ def build_app():
                                         file_types=['.xlsx'], type='filepath')
             matcher_mode = gr.Radio(choices=[('로컬 폴더', 'folder'), ('ZIP 파일', 'zip')],
                                     value='folder', label='라벨링데이터 위치')
-            matcher_folder = gr.Textbox(label='로컬 폴더 경로',
-                placeholder=r'C:\...\2.라벨링데이터',
-                info='Gradio 서버가 실행 중인 PC의 경로를 입력해 주세요.')
+            with gr.Row():
+                matcher_folder = gr.Textbox(label='로컬 폴더 경로 (자동 입력)',
+                    placeholder=r'C:\...\2.라벨링데이터', scale=5,
+                    info='버튼으로 폴더 선택. Windows 로컬 PC에서 실행 중일 때 팝업이 열립니다.')
+                folder_browse = gr.Button('📁 폴더 선택...', variant='secondary', scale=1)
+            browse_notice = gr.Markdown('')
             matcher_zip = gr.File(label='라벨링데이터 ZIP', file_count='single',
                                   file_types=['.zip'], type='filepath', visible=False)
             matcher_button = gr.Button('오류 파일 찾기', variant='primary')
@@ -508,7 +612,13 @@ def build_app():
             with gr.Row():
                 matcher_csv = gr.File(label='전체 매칭 결과 CSV', interactive=False)
                 matcher_json = gr.File(label='매칭 요약 JSON', interactive=False)
-            gr.Markdown('**보완 전후 검토**: 실제 JSON/JSONL 값이 확인된 경우만 보완 전을 기록합니다. 보완 후는 규칙상 수정 지시이며, 완료 판정이 아닙니다.')
+            final_dataset_removed = gr.Checkbox(
+                label='선택한 폴더/ZIP이 최종 보완 데이터셋입니다. 여기에서 없는 오류 파일은 삭제·제외로 간주',
+                value=False,
+                info='최종 보완 데이터셋을 지정한 경우에만 선택하세요. 잘못된 폴더를 선택하면 삭제로 잘못 판정할 수 있습니다.',
+            )
+            gr.Markdown('**보완 전후 검토**: 실제 파일을 확인한 경우에만 현재값을 기록합니다. '
+                        '최종 데이터셋의 미존재 파일은 체크한 경우 삭제·제외로 간주하고, 실제 삭제 이력 확인과는 구분합니다.')
             inspect_button = gr.Button('보완 전후 검토 초안 생성', variant='secondary')
             evidence_notice = gr.Markdown('')
             evidence_preview = gr.Dataframe(label='보완 전후 검토 (처음 40건)', interactive=False, wrap=True)
@@ -517,15 +627,36 @@ def build_app():
                 evidence_json = gr.File(label='검토 요약 JSON', interactive=False)
 
 
+            gr.Markdown('### 선택 기능: 로컬 Correction Agent (Qwen2.5 7B)')
+            gr.Markdown('④의 보완 전후 CSV를 Qwen2.5 모델로 검토하여 한국어 보완 후 수정안을 제안합니다. '
+                        '**외부 API 미사용 · 원본 불변 · 수정 완료 아님**. '
+                        '회사에서 로컬 모델 처리가 허용된 데이터에만 사용하세요.')
+            with gr.Row():
+                agent_use_step4 = gr.Button('④ 검토 CSV 불러오기', variant='secondary')
+                agent_input_csv = gr.File(label='④ 검사 검토 CSV', file_count='single',
+                                          file_types=['.csv'], type='filepath')
+            with gr.Row():
+                agent_model = gr.Textbox(label='로컬 Ollama 모델', value='qwen2.5:7b-instruct')
+                agent_limit = gr.Number(label='최대 제안 생성 건수', value=10,
+                                        precision=0, minimum=1, maximum=200)
+                agent_include_before = gr.Checkbox(
+                    label='실제 보완 전 값 일부를 로컬 모델에 전달 (회사 사용 정책 확인)', value=True)
+            agent_button = gr.Button('Qwen2.5 한국어 수정 제안 생성', variant='secondary')
+            agent_notice = gr.Markdown('')
+            agent_preview = gr.Dataframe(label='Correction Agent 결과 미리보기 (처음 30건)',
+                                         interactive=False, wrap=True)
+            agent_csv = gr.File(label='수정 제안 CSV — ⑤에 사용', interactive=False)
+
+
         with gr.Tab('⑤ 보완 전후 Excel 반영'):
-            gr.Markdown('③에서 만든 Excel과 ④의 검토 CSV를 결합합니다. **③ 초안과 원본 파일은 그대로 보존**합니다.')
+            gr.Markdown('③ Excel과 ④ 검토 CSV 또는 로컬 Correction Agent의 새 CSV를 결합합니다. **원본은 그대로 보존**합니다.')
             with gr.Row():
                 step5_import = gr.Button('현재 ③·④ 결과 불러오기', variant='secondary')
             step5_inspection = gr.File(label='검사결과서 Excel', file_count='single',
                                        file_types=['.xlsx'], type='filepath')
             step5_draft = gr.File(label='③ 보완결과서 초안 Excel', file_count='single',
                                   file_types=['.xlsx'], type='filepath')
-            step5_review = gr.File(label='④ 보완 전후 검토 CSV', file_count='single',
+            step5_review = gr.File(label='④ 보완 전후 검토 CSV (Correction Agent CSV 가능)', file_count='single',
                                    file_types=['.csv'], type='filepath')
             step5_info = gr.Markdown('')
             step5_button = gr.Button('보완 전후 Excel 반영', variant='primary')
@@ -533,9 +664,19 @@ def build_app():
             step5_download = gr.File(label='⑤ 반영된 보완결과서 다운로드', interactive=False)
             gr.Markdown('※ 실제 데이터 수정·재검증이 아닌, 보완 전후 검토 기록을 기존 Excel에 작성하는 단계입니다.')
 
+        agent_use_step4.click(
+            lambda path: gr.update(value=path),
+            inputs=[evidence_csv], outputs=[agent_input_csv],
+        )
+        agent_button.click(
+            write_local_correction_suggestions,
+            inputs=[agent_input_csv, agent_model, agent_limit, agent_include_before],
+            outputs=[agent_notice, agent_preview, agent_csv],
+            concurrency_limit=1,
+        )
         step5_import.click(
             load_step5_inputs,
-            inputs=[report_input, report_download, matcher_inspection, evidence_csv],
+            inputs=[report_input, report_download, matcher_inspection, evidence_csv, agent_csv],
             outputs=[step5_inspection, step5_draft, step5_review, step5_info],
         )
         step5_button.click(
@@ -545,6 +686,10 @@ def build_app():
             concurrency_limit=1,
         )
 
+        folder_browse.click(choose_local_folder,
+            inputs=[matcher_folder], outputs=[matcher_folder, browse_notice],
+            concurrency_limit=1,
+        )
         matcher_mode.change(
             lambda mode: (gr.update(visible=mode == 'folder'),
                           gr.update(visible=mode == 'zip')),
@@ -558,7 +703,8 @@ def build_app():
         )
         inspect_button.click(
             inspect_before_after,
-            inputs=[matcher_inspection, matcher_mode, matcher_folder, matcher_zip],
+            inputs=[matcher_inspection, matcher_mode, matcher_folder, matcher_zip,
+                    final_dataset_removed],
             outputs=[evidence_notice, evidence_preview, evidence_csv, evidence_json],
             concurrency_limit=1,
         )
